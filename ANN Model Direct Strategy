@@ -1,0 +1,217 @@
+library(keras)
+library(mlbench)
+library(dplyr)
+library(magrittr)
+library(neuralnet)
+library(ggplot2)
+
+#Dataset
+dataset <- Dataset %>% 
+  slice(-c(2019:2020)) %>% 
+  filter(!Sampel %in% c(75))
+
+#Splitting Dataset
+# Splitting data training dan testing
+# Menghitung jumlah baris unik dalam dataframe
+sampel <- length(unique(dataset$Sampel))
+
+# Menentukan jumlah data training yang diinginkan (70% dari total data)
+sampel_training <- round(0.7 * sampel)
+
+# Menetapkan seed untuk reproduktibilitas hasil acak
+set.seed(3)
+
+# Menghasilkan indeks acak untuk pemisahan data training dan testing
+indeks <- sample(1:sampel)
+
+# Memisahkan data menjadi data training dan testing berdasarkan indeks acak
+training <- dataset[dataset$Sampel %in% 
+                       unique(dataset$Sampel)
+                     [indeks[1:sampel_training]], ]
+testing <- dataset[dataset$Sampel %in% 
+                      unique(dataset$Sampel)
+                    [indeks[(sampel_training + 1):sampel]], ]
+
+# Ambil fitur (X) dari kolom 2-12
+training_X <- training[, 2:12]
+testing_X <- testing[, 2:12]
+
+# Ambil target/output (Y) dari kolom 13-14
+Output_Train <- training[, 13:14]
+Output_Test <- testing[, 13:14]
+
+#Normalisasi Data
+m <- colMeans(training_X)
+s <- apply(training_X, 2, sd)
+training_X <- scale(training_X, center = m, scale = s)
+testing_X <- scale(testing_X, center = m, scale = s)
+
+#Model ANN Keras
+ANN <- keras_model_sequential()
+ANN %>% 
+  layer_dense(units = 100, activation = 'relu', input_shape = c(11)) %>%
+  layer_dropout(rate = 0.4) %>%
+  layer_dense(units = 50, activation = 'relu', input_shape = c(11)) %>%
+  layer_dropout(rate = 0.3) %>%
+  layer_dense(units = 20, activation = 'relu', input_shape = c(11)) %>%
+  layer_dropout(rate = 0.2) %>%
+  layer_dense(units = 2)
+
+#Compile
+rmse <- function(y_true, y_pred) {
+  K <- backend()
+  return(K$sqrt(K$mean(K$square(y_pred - y_true))))
+}
+
+ANN %>% compile(loss = 'mse',
+                optimizer = optimizer_adam(learning_rate = 0.001),
+                metrics = list('mae', rmse))
+
+#Training Model
+model_ANN <- ANN %>%
+  fit(x = as.matrix(training_X),
+      y = as.matrix(Output_Train),
+      epochs = 500,
+      batch_size = 32,
+      validation_split = 0.2)
+
+#Testing Model
+ANN %>% evaluate(as.matrix(testing_X), as.matrix(Output_Test))
+pred <- ANN %>% predict(as.matrix(testing_X))
+pred <- as.matrix(pred)
+
+#Prediksi Stress dan PWP
+# Pisahkan hasil prediksi untuk Stress dan PWP
+pred_stress <- pred[,1]
+pred_pwp <- pred[,2]
+pred_stress[true_stress == 0] <- 0
+pred_pwp[true_pwp == 0] <- 0
+
+# Pisahkan nilai sebenarnya untuk Stress dan PWP
+Output_Test <- as.matrix(Output_Test)
+true_stress <- Output_Test[,1]
+true_pwp <- Output_Test[,2]
+
+# Hitung RMSE untuk masing-masing
+rmse_stress <- sqrt(mean((true_stress - pred_stress)^2))
+rmse_pwp <- sqrt(mean((true_pwp - pred_pwp)^2))
+
+# Hitung MAE untuk masing-masing
+mae_stress <- mean(abs(true_stress - pred_stress))
+mae_pwp <- mean(abs(true_pwp - pred_pwp))
+
+# Tampilkan hasil
+cat("RMSE Stress:", rmse_stress, "\n")
+cat("RMSE PWP:", rmse_pwp, "\n")
+cat("MAE Stress:", mae_stress, "\n")
+cat("MAE PWP:", mae_pwp, "\n")
+
+#Plot Strss dan PWP Prediksi
+dev.new()
+par(mfrow = c(1,2))
+
+# Tentukan range yang sama untuk kedua sumbu
+margin_factor <- 0.05 
+range_stress <- range_stress + c(-1, 1) * diff(range_stress) * margin_factor
+range_pwp <- range_pwp + c(-1, 1) * diff(range_pwp) * margin_factor
+
+# Plot Stress
+plot(true_stress, pred_stress, main="Stress: True vs. Predicted",
+     xlab="True Stress", ylab="Predicted Stress", col="blue", pch=16,
+     xlim = range_stress, ylim = range_stress)
+abline(0,1, col="red", lwd=2)
+
+# Plot PWP
+plot(true_pwp, pred_pwp, main="PWP: True vs. Predicted",
+     xlab="True PWP", ylab="Predicted PWP", col="green", pch=16,
+     xlim = range_pwp, ylim = range_pwp)
+abline(0,1, col="red", lwd=2)
+
+# Pastikan ada kolom Strain di dataset testing
+strain <- testing$Strain  
+ylim_stress <- range(c(true_stress, pred_stress))
+ylim_pwp <- range(c(true_pwp, pred_pwp))
+xlim_strain <- range(strain)
+
+# Plot Stress vs Strain
+ggplot(testing, aes(x = Strain, y = Stress, group = Sampel)) +
+  geom_point() +
+  geom_line(aes(y = hasil_prediksi$Pred_Stress), color = "blue") +
+  labs(x = "Strain (%)", y = "Stress (kPa)", title = "Stress vs Strain") +
+  theme_bw(base_size =12) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.05))) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme(legend.position = "bottom", panel.grid = element_blank(),
+        legend.background = element_rect(fill = "white")) +
+  geom_text(x = max(testing$Strain, na.rm = TRUE) * 0.8, 
+            y = max(testing$Stress, na.rm = TRUE) * 0.9,
+            label = sprintf("RMSE: %.2f\nMAE: %.2f", rmse_stress, mae_stress), 
+            size = 5, hjust = 0)
+
+# Plot PWP vs Strain
+ggplot(testing, aes(x = Strain, y = PWP, group = Sampel)) +
+  geom_point() +
+  geom_line(aes(y = hasil_prediksi$Pred_PWP), color = "red") +
+  labs(x = "Strain (%)", y = "PWP (kPa)", title = "PWP vs Strain") +
+  theme_bw(base_size = 12) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.05))) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme(legend.position = "bottom", panel.grid = element_blank(),
+        legend.background = element_rect(fill = "white")) +
+  geom_text(x = max(testing$Strain, na.rm = TRUE) * 0.8, 
+            y = max(testing$PWP, na.rm = TRUE) * 0.9,
+            label = sprintf("RMSE: %.2f\nMAE: %.2f", rmse_pwp, mae_pwp), 
+            size = 5, hjust = 0)
+
+ggplot(subset(hasil_prediksi, Sampel == 52), aes(x = Strain, group = Sampel)) +
+  geom_line(aes(y = Pred_PWP), color = "red") + # Hasil prediksi 
+  geom_point(aes(y = True_PWP)) + # Data asli 
+  labs(x = "Strain (%)", y = "PWP (kPa)") +
+  theme_bw(base_size = 12) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.05))) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme(
+    axis.text = element_text(size = 12),
+    panel.grid = element_blank(),
+    legend.background = element_rect(fill = "white")) +
+  geom_text(
+    x = 4, 
+    y = 5,
+    label = paste("RMSE:", round(rmse_pwp, 2), "\n", "MAE:", round(mae_pwp, 2)),
+    color = "black",
+    size = 5, 
+    hjust = 0)
+
+ggplot(subset(hasil_prediksi, Sampel == 52), aes(x = Strain, group = Sampel)) +
+  geom_line(aes(y = Pred_Stress), color = "blue") + # Hasil prediksi model 
+  geom_point(aes(y = True_Stress)) + # Data asli 
+  labs(x = "Strain (%)", y = "Stress (kPa)") +
+  theme_bw(base_size = 12) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.05))) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme(
+    axis.text = element_text(size = 12),
+    panel.grid = element_blank(),
+    legend.background = element_rect(fill = "white")) +
+  geom_text(
+    x = 4, 
+    y = 8,
+    label = paste("RMSE:", round(rmse_stress, 2), "\n", "MAE:", round(mae_stress, 2)),
+    color = "black",
+    size = 5, 
+    hjust = 0)
+
+#Cek Hasil Prediksi Dalam Dataset
+hasil_prediksi <- data.frame(
+  Sampel = testing$Sampel,
+  Strain = testing$Strain,
+  True_Stress = true_stress,
+  Pred_Stress = pred_stress,
+  True_PWP = true_pwp,
+  Pred_PWP = pred_pwp)
+
+# Simpan sebagai CSV
+write.csv(hasil_prediksi, "hasil_prediksi.csv", row.names = FALSE)
+
+# Lihat beberapa baris pertama
+head(hasil_prediksi)
