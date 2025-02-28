@@ -1,0 +1,285 @@
+library(randomForestSRC)
+library(tidyr)
+library(ranger)
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+
+# Cleaning dataset
+df_clean <- Database %>% 
+  slice(-c(2019:2020)) %>% 
+  filter(!Sampel %in% c(75))
+
+# Splitting data training dan testing
+# Menghitung jumlah baris unik dalam dataframe
+sampel <- length(unique(df_clean$Sampel))
+
+# Menentukan jumlah data training yang diinginkan (70% dari total data)
+sampel_training <- round(0.7 * sampel)
+
+# Menetapkan seed untuk reproduktibilitas hasil acak
+set.seed(3)
+
+# Menghasilkan indeks acak untuk pemisahan data training dan testing
+indeks <- sample(1:sampel)
+
+# Memisahkan data menjadi data training dan testing berdasarkan indeks acak
+training <- df_clean[df_clean$Sampel %in% 
+                       unique(df_clean$Sampel)
+                     [indeks[1:sampel_training]], ]
+testing <- df_clean[df_clean$Sampel %in% 
+                      unique(df_clean$Sampel)
+                    [indeks[(sampel_training + 1):sampel]], ]
+
+# Tambahkan kolom 'set'
+df_kombinasi <- bind_rows(
+  training %>% mutate(Dataset = "Training"),
+  testing %>% mutate(Dataset = "Testing")) 
+
+# Hitung jumlah sampel 
+jumlah_sampel <- df_kombinasi %>%
+  pivot_longer(cols = -c(Sampel, Dataset), 
+               names_to = "variable", 
+               values_to = "value") %>%
+  group_by(Dataset, Sampel, variable, value) %>%
+  summarize(across(everything(), ~ mean(.x, na.rm = TRUE))) %>%
+  filter(!variable %in% c("Stress", "Strain", "PWP"))
+
+# Buat plot distribusi
+split_distribusi <- ggplot(jumlah_sampel, aes(x = value, fill = Dataset)) +
+  geom_histogram(color = "black", position= "dodge") +
+  facet_wrap(~variable, scales = "free") +
+  scale_fill_manual(values = c("Training" = "dodgerblue", "Testing" = "red")) +
+  theme_bw(base_size = 10) +
+  labs(x = NULL, y = NULL) +  
+  theme(axis.text = element_text(size = 10), panel.grid = element_blank(),
+        legend.position = "bottom")
+split_distribusi
+
+# Input (predictor variables) - x_train and x_test as data frames
+x_train <- training[, c("Strain", "Conf", "PL", "LL", "PI", "Gama", "W", "F4.75", "F0.075", "F0.002", "Gs")]
+y_train <- training[, c("Stress", "PWP")]
+
+x_test <- testing[, c("Strain", "Conf", "PL", "LL", "PI", "Gama", "W", "F4.75", "F0.075", "F0.002", "Gs")]
+
+# Gabungkan x_train dan y_train
+y_train_combined <- as.data.frame(y_train) 
+training_data <- cbind(x_train, y_train_combined) 
+
+# Membuat model Random Forest multi-output
+morf_model <- rfsrc(
+  Multivar(cbind(Stress, PWP)) ~ ., 
+  data = training_data,             
+  ntree = 300,                       
+  mtry = 5,                         
+  nodesize = 5,                     
+  nthreads = 10)
+
+# Prediksi pada data uji
+x_test_combined <- as.data.frame(x_test) # Pastikan x_test adalah data frame
+predictions <- predict(morf_model, newdata = x_test_combined)
+
+# Akses prediksi untuk Stress dan PWP
+y_pred_stress <- predictions$regrOutput$Stress$predicted
+y_pred_pwp <- predictions$regrOutput$PWP$predicted
+
+# Gabungkan hasil prediksi
+y_pred <- data.frame(Stress = y_pred_stress, PWP = y_pred_pwp)
+y_test <- testing[, c("Stress", "PWP", "Sampel")]
+
+# Gabungkan ke dalam satu dataset
+results <- data.frame(
+  Stress_actual = y_test$Stress,
+  Stress_predicted = y_pred[, 1],  # Prediksi untuk Stress
+  PWP_actual = y_test$PWP,
+  PWP_predicted = y_pred[, 2],     # Prediksi untuk PWP
+  Sampel = y_test$Sampel,
+  Strain = testing$Strain
+)
+
+# Menggunakan dplyr untuk mengatur prediksi pada baris pertama tiap sampel menjadi 0
+results <- results %>%
+  group_by(Sampel) %>%
+  mutate(
+    Stress_predicted = if_else(row_number() == 1, 0, Stress_predicted),
+    PWP_predicted = if_else(row_number() == 1, 0, PWP_predicted)
+  ) %>%
+  ungroup()
+
+# Hitung RMSE
+rmse_stress <- sqrt(mean((results$Stress_actual - results$Stress_predicted)^2))
+rmse_pwp <- sqrt(mean((results$PWP_actual - results$PWP_predicted)^2))
+
+# Hitung MAE
+mae_stress <- mean(abs(results$Stress_actual - results$Stress_predicted))
+mae_pwp <- mean(abs(results$PWP_actual - results$PWP_predicted))
+
+# Tampilkan hasil
+rmse_stress
+rmse_pwp
+mae_stress
+mae_pwp
+
+# Plot 1:1
+plot1 <- ggplot(results, aes(x = Stress_actual, y = Stress_predicted)) +
+  geom_point() + # Distribusi Prediksi
+  theme_bw(base_size = 12) +
+  labs(x = "Actual Stress (kPa)", y = "Prediction Stress (kPa)") +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "solid") +
+  geom_text(
+    x = 12, 
+    y = 120,
+    label = paste("RMSE:", round(rmse_stress, 2), "\n", "MAE:", round(mae_stress, 2)),
+    color = "black", 
+    size = 5,
+    hjust = 0) +
+  scale_x_continuous(limits = c(0, 150)) +  
+  scale_y_continuous(limits = c(0, 150)) + 
+  theme (axis.text = element_text(size = 12),
+         panel.grid = element_blank())
+plot1
+
+plot2 <- ggplot(results, aes(x = PWP_actual, y = PWP_predicted)) +
+  geom_point() + # Distribusi Prediksi
+  theme_bw(base_size = 12) +
+  labs(x = "Actual PWP (kPa)", y = "Prediction PWP (kPa)") +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "solid") +
+  geom_text(
+    x = 10, 
+    y = 90,
+    label = paste("RMSE:", round(rmse_pwp, 2), "\n", "MAE:", round(mae_pwp, 2)),
+    color = "black", 
+    size = 5,
+    hjust = 0) +
+  scale_x_continuous(limits = c(0, 110)) +  
+  scale_y_continuous(limits = c(0, 110)) + 
+  theme (axis.text = element_text(size = 12),
+         panel.grid = element_blank())
+plot2
+
+# Plot strain vs predicted OLS model
+plot3 <- ggplot(testing, aes(x = Strain, y = Stress, group = Sampel)) +
+  geom_point() + # Dataset asli
+  geom_line(aes(y = results$Stress_predicted), color = "blue") + # Hasil prediksi model
+  labs( x = "Strain (%)", y = "Stress (kPa)") +
+  theme_bw(base_size = 12) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.05))) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme(
+    axis.text = element_text(size = 12),
+    panel.grid = element_blank(),
+    legend.background = element_rect(fill = "white")) +
+  geom_text(
+    x = 12, 
+    y = 120,
+    label = paste("RMSE:", round(rmse_stress, 2), "\n", "MAE:", round(mae_stress, 2)),
+    color = "black",
+    size = 5, 
+    hjust = 0)
+plot3
+
+plot4 <- ggplot(testing, aes(x = Strain, y = PWP, group = Sampel)) +
+  geom_point() + # Dataset asli
+  geom_line(aes(y = results$PWP_predicted), color = "blue") + # Hasil prediksi model
+  labs( x = "Strain (%)", y = "PWP (kPa)") +
+  theme_bw(base_size = 12) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.05))) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme(
+    axis.text = element_text(size = 12),
+    panel.grid = element_blank(),
+    legend.background = element_rect(fill = "white")) +
+  geom_text(
+    x = 12, 
+    y = 75,
+    label = paste("RMSE:", round(rmse_pwp, 2), "\n", "MAE:", round(mae_pwp, 2)),
+    color = "black",
+    size = 5, 
+    hjust = 0)
+plot4
+
+plot5 <- ggplot(subset(results, Sampel == 30), aes(x = Strain, group = Sampel)) +
+  geom_line(aes(y = PWP_predicted), color = "blue") + # Hasil prediksi 
+  geom_point(aes(y = PWP_actual)) + # Data asli 
+  labs(x = "Strain (%)", y = "PWP (kPa)") +
+  theme_bw(base_size = 12) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.05))) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme(
+    axis.text = element_text(size = 12),
+    panel.grid = element_blank(),
+    legend.background = element_rect(fill = "white")
+  ) +
+  geom_text(
+    x = 7.5, 
+    y = 40,
+    label = paste("RMSE:", round(rmse_pwp, 2), "\n", "MAE:", round(mae_pwp, 2)),
+    color = "black",
+    size = 5, 
+    hjust = 0
+  )
+plot5
+
+plot6 <- ggplot(subset(results, Sampel == 30), aes(x = Strain, group = Sampel)) +
+  geom_line(aes(y = Stress_predicted), color = "blue") + # Hasil prediksi model 
+  geom_point(aes(y = Stress_actual)) + # Data asli 
+  labs(x = "Strain (%)", y = "Stress (kPa)") +
+  theme_bw(base_size = 12) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.05))) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme(
+    axis.text = element_text(size = 12),
+    panel.grid = element_blank(),
+    legend.background = element_rect(fill = "white")
+  ) +
+  geom_text(
+    x = 7.5, 
+    y = 60,
+    label = paste("RMSE:", round(rmse_stress, 2), "\n", "MAE:", round(mae_stress, 2)),
+    color = "black",
+    size = 5, 
+    hjust = 0
+  )
+plot6
+
+# Hitung nilai error
+results <- results %>%
+  mutate(Stress_error = Stress_actual - Stress_predicted,
+         PWP_error = PWP_actual - PWP_predicted)
+
+# Error Stress vs Strain
+plotA <- ggplot(results, aes(x = Strain, y = Stress_error)) +
+  geom_segment(aes(x = Strain, xend = Strain, y = 0, yend = Stress_error),
+               color = "red", size = 1) +
+  labs(title = "Error Stress vs Strain",
+       x = "Strain",
+       y = "Error Stress") +
+  theme_minimal()
+
+# Error PWP vs Strain
+plotB <- ggplot(results, aes(x = Strain, y = PWP_error)) +
+  geom_segment(aes(x = Strain, xend = Strain, y = 0, yend = PWP_error),
+               color = "blue", size = 1) +
+  labs(title = "Error PWP vs Strain",
+       x = "Strain",
+       y = "Error PWP") +
+  theme_minimal()
+plotA
+plotB
+
+# Buka perangkat grafis PDF
+pdf("morf_one model.pdf", width = 8, height = 6)
+
+# Cetak plot ke halaman PDF
+print(plot1)
+print(plot2)
+print(plot3)
+print(plot4)
+print(plot5)
+print(plot6)
+print(plotA)
+print(plotB)
+
+# Tutup perangkat grafis
+dev.off()
+getwd()
