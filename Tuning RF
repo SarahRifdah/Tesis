@@ -1,0 +1,32 @@
+library(tuneRanger)
+library(mlr)
+library(OpenML)
+library(farff)
+
+# Training dataset
+training_stress <- df_trimmed[, c("Strain", "Conf", "PL", "LL", "PI", "Gama", 
+                              "W", "F4.75", "F0.075", "F0.002", "Gs", "Stress")]
+# Buat regression task
+stress_task <- makeRegrTask(data = df_trimmed, target = "Stress")
+
+# Estimasi waktu tuning
+estimateTimeTuneRanger(stress_task)
+
+# Tuning Hyperparameter Model
+tuned_params <- tuneRanger(
+  stress_task,  
+  measure = list(rmse),
+  iters = 100,  
+  iters.warmup = 30)
+tuned_params
+
+lrn = makeLearner("regr.ranger", num.trees = 500, predict.type = "response")
+lrn2 = makeLearner("regr.tuneRanger", num.threads = 2, predict.type = "response")
+
+set.seed(3)
+rdesc = makeResampleDesc("RepCV", reps = 5, folds = 5)
+
+# Bandingkan performa model sebelum dan sesudah tuning
+bmr = benchmark(list(lrn, lrn2), stress_task, rdesc, measures = list(rmse, mae))
+bmr
+print(bmr)
