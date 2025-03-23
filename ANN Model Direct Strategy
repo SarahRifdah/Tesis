@@ -1,8 +1,5 @@
 library(keras)
-library(mlbench)
 library(dplyr)
-library(magrittr)
-library(neuralnet)
 library(ggplot2)
 
 #Dataset
