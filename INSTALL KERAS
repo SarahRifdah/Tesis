@@ -1,0 +1,19 @@
+Download Phyton versi jangan yg terbaru, cukup 3.11
+
+library(reticulate)
+
+# Buat ulang virtual environment baru
+virtualenv_create("r-tensorflow")
+
+# Arahkan reticulate ke environment yang baru dibuat
+use_virtualenv("r-tensorflow", required = TRUE)
+
+# Install TensorFlow 2.15, Keras 2.15, NumPy, dan dependensi lainnya
+py_install(
+  packages = c("tensorflow==2.15.0", "keras==2.15.0", "numpy", "h5py", "pandas", "scipy"),
+  envname = "r-tensorflow"
+)
+
+# Cek apakah TensorFlow sudah berhasil diinstal
+library(tensorflow)
+tensorflow::tf$constant("TensorFlow is working!")
